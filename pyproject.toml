@@ -115,4 +115,5 @@ follow_imports = "silent"
 [tool.pytest.ini_options]
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "xpu: requires a real Intel XPU (select with '-m xpu')",
 ]

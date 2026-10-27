@@ -39,6 +39,7 @@ from transformers import (
 import torch
 
 # First Party
+from instructlab.training import device_utils
 from instructlab.training.config import (  # Adjust this import if needed
     DistributedBackend,
     Optimizer,
@@ -483,6 +484,14 @@ class Model:
             RuntimeError: If trying to use flash attention on unsupported hardware
         """
         if disable_flash_attn:
+            return False
+        if device_utils.is_xpu():
+            # flash_attn has no XPU build. Fall back to the padded (non-flash)
+            # batching path rather than probing CUDA device capability.
+            logger.warning(
+                "Flash Attention is not available on Intel XPU; training without it "
+                "(padded batches with the model's default attention)."
+            )
             return False
         if Model.supports_flash_attention():
             return True

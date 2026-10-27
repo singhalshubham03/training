@@ -33,6 +33,7 @@ import torch
 import torch.nn.functional as F
 
 # First Party
+from instructlab.training import device_utils
 from instructlab.training.config import (
     DistributedBackend,
     QuantizeDataType,
@@ -487,7 +488,9 @@ def save_fsdp_gpt_oss_model(
         for clean_name, param in expert_params_to_process:
             # Create mini state dict with just this parameter on GPU
             mini_state = {
-                clean_name: param.cuda() if param.device.type == "cpu" else param
+                clean_name: param.to(device_utils.get_device())
+                if param.device.type == "cpu"
+                else param
             }
 
             # Convert this parameter
@@ -502,7 +505,7 @@ def save_fsdp_gpt_oss_model(
 
             # Clean up GPU memory
             del mini_state, mini_converted
-            torch.cuda.empty_cache()
+            device_utils.get_device_module().empty_cache()
 
         # Save state dict using accelerator.save
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -821,7 +824,7 @@ def set_random_seed(seed):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        device_utils.get_device_module().manual_seed_all(seed)
 
 
 # TODO: move this to also live in the `Model` object
