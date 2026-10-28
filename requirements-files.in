@@ -4,3 +4,4 @@ requirements-cuda.txt
 requirements-deepspeed.txt
 requirements-hpu.txt
 requirements-rocm.txt
+requirements-xpu.txt

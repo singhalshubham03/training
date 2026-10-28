@@ -1,0 +1,2 @@
+# flash-attention kernel with Intel XPU builds (kernels-community/flash-attn2)
+kernels>=0.9.0

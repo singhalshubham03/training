@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for Intel XPU support: device selection, flash-attn fallback, teardown."""
+"""Tests for Intel XPU support: device selection, attention selection, teardown."""
 
 # Standard
 from pathlib import Path
@@ -81,14 +81,45 @@ def test_num_alloc_retries_missing_on_xpu(monkeypatch):
     assert device_utils.num_alloc_retries() == 3
 
 
-def test_flash_attn_disabled_on_xpu_without_probing_cuda(monkeypatch):
+def test_flash_path_kept_on_xpu_without_probing_cuda(monkeypatch):
+    # XPU keeps the flash (padding-free) path instead of falling back to padded
+    # batches, and must not probe CUDA device capability.
     _fake(monkeypatch, cuda=False, xpu=True)
     with patch(
         "torch.cuda.get_device_capability",
         side_effect=AssertionError("Torch not compiled with CUDA enabled"),
     ):
-        assert Model.check_flash_attn_enabled(False) is False
+        assert Model.check_flash_attn_enabled(False) is True
         assert Model.check_flash_attn_enabled(True) is False
+
+
+@pytest.fixture
+def _fresh_attn_choice():
+    device_utils.xpu_flash_attn_implementation.cache_clear()
+    yield
+    device_utils.xpu_flash_attn_implementation.cache_clear()
+
+
+@pytest.mark.usefixtures("_fresh_attn_choice")
+def test_xpu_attn_uses_hub_flash_kernel():
+    with patch(
+        "transformers.integrations.hub_kernels.load_and_register_attn_kernel"
+    ) as load:
+        assert (
+            device_utils.xpu_flash_attn_implementation()
+            == device_utils.XPU_FLASH_ATTN_KERNEL
+        )
+    load.assert_called_once_with(device_utils.XPU_FLASH_ATTN_KERNEL)
+
+
+@pytest.mark.usefixtures("_fresh_attn_choice")
+def test_xpu_attn_falls_back_to_sdpa_when_kernel_unavailable(caplog):
+    with patch(
+        "transformers.integrations.hub_kernels.load_and_register_attn_kernel",
+        side_effect=ImportError("kernels is not installed"),
+    ):
+        assert device_utils.xpu_flash_attn_implementation() == "sdpa"
+    assert "using SDPA with padding-free batches" in caplog.text
 
 
 def test_shutdown_dataloader_workers_stops_persistent_workers():
@@ -111,6 +142,43 @@ def test_shutdown_dataloader_workers_noop_without_workers():
     for _ in loader:
         pass
     _shutdown_dataloader_workers(loader)  # single-process iterator: nothing to stop
+
+
+def _tiny_llama(attn_implementation: str):
+    # Third Party
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        attn_implementation=attn_implementation,
+    )
+    return LlamaForCausalLM(cfg).to("xpu", torch.bfloat16).eval()
+
+
+@requires_xpu
+@pytest.mark.usefixtures("_fresh_attn_choice")
+def test_packed_sequences_isolated_with_xpu_attention():
+    # The padding-free path packs samples into one row; attention must not cross
+    # sample boundaries. Compare against running each sample on its own.
+    impl = device_utils.xpu_flash_attn_implementation()
+    model = _tiny_llama(impl)
+    assert model.config._attn_implementation == impl
+    lens = [7, 19, 4]
+    seqs = [torch.randint(0, 128, (n,), device="xpu") for n in lens]
+    ids = torch.cat(seqs)[None]
+    pos = torch.cat([torch.arange(n, device="xpu") for n in lens])[None]
+    with torch.no_grad():
+        separate = torch.cat([model(s[None]).logits[0] for s in seqs]).float()
+        packed = model(ids, position_ids=pos, use_cache=False).logits[0].float()
+        leaky = model(ids, use_cache=False).logits[0].float()  # no isolation
+    assert (packed - separate).abs().max() < 0.05, impl
+    assert (leaky - separate).abs().max() > 0.1  # the check can see leakage
 
 
 # With XCCL, destroy_process_group() blocks indefinitely while forked DataLoader

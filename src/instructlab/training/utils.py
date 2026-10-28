@@ -96,8 +96,12 @@ def check_valid_train_args(train_args: TrainingArgs):
             "Quantization is not supported when training LoRA models with FSDP. For quantized LoRA training, please switch to DeepSpeed."
         )
 
-    if Model.check_flash_attn_enabled(train_args.disable_flash_attn):
-        # verify that the flash_attn package is actually installed
+    if (
+        Model.check_flash_attn_enabled(train_args.disable_flash_attn)
+        and not device_utils.is_xpu()
+    ):
+        # verify that the flash_attn package is actually installed (CUDA/ROCm;
+        # XPU uses a hub kernel or SDPA, see device_utils.xpu_flash_attn_implementation)
         try:
             # pylint: disable=unused-import
             # Third Party

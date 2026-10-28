@@ -10,10 +10,18 @@ is not, so behavior on CUDA and CPU-only hosts is unchanged.
 """
 
 # Standard
+import functools
+import logging
 import os
 
 # Third Party
 import torch
+
+logger = logging.getLogger("instructlab.training")
+
+# Hugging Face hub flash-attention kernel with Intel XPU builds: the XPU
+# counterpart of flash_attention_2 (the flash_attn package is CUDA/ROCm only).
+XPU_FLASH_ATTN_KERNEL = "kernels-community/flash-attn2"
 
 
 def get_device_type() -> str:
@@ -52,3 +60,32 @@ def get_device(local_rank: int | None = None) -> torch.device:
 def num_alloc_retries() -> int:
     """Allocator retry count; XPU's memory_stats() has no such counter, so 0 there."""
     return get_device_module().memory_stats().get("num_alloc_retries", 0)
+
+
+@functools.cache
+def xpu_flash_attn_implementation() -> str:
+    """Attention implementation for padding-free (packed) training on XPU.
+
+    Returns the hub flash-attention kernel when it can be loaded (needs the
+    ``kernels`` package, see the ``xpu`` extra), else ``"sdpa"``. Both keep
+    packed sequences isolated through ``position_ids``, so the padding-free
+    batching path is used either way.
+    """
+    try:
+        # Third Party
+        from transformers.integrations.hub_kernels import (
+            load_and_register_attn_kernel,
+        )
+
+        load_and_register_attn_kernel(XPU_FLASH_ATTN_KERNEL)
+        logger.info("XPU: using flash attention kernel %s", XPU_FLASH_ATTN_KERNEL)
+        return XPU_FLASH_ATTN_KERNEL
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "Flash attention kernel %s unavailable on XPU (%s); using SDPA with "
+            "padding-free batches instead. Install it with "
+            "`pip install instructlab-training[xpu]`.",
+            XPU_FLASH_ATTN_KERNEL,
+            exc,
+        )
+        return "sdpa"
